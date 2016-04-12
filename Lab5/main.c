@@ -34,7 +34,9 @@ Signal   |     |        PC1|---------------->|D5        |
 ************************************************************************/
 
 #define F_CPU 8000000UL							// 8 MHz clock speed
+
 #define BAUD 9600
+#define BAUD_PRESCALE (((F_CPU / (BAUD * 16UL))) - 1)
 
 #include <avr/io.h>
 #include <util/delay.h>
@@ -187,12 +189,16 @@ int main(void)
 	//i2c_init();				// initialize I2C library
 	
 
-
+	char ReceivedByte;
 	// endless loop
 	while(1)
 	{
-		uart_printstr(sdata);		// Print a string from SRAM
-		uart_printstr(fdata);
+		while ((UCSR0A & (1 << RXC0)) == 0) {}; // Do nothing until data have been received and is ready to be read from UDR
+		ReceivedByte = UDRE0; // Fetch the received byte value into the variable "ByteReceived"
+
+		while ((UCSR0A & (1 << TXC0)) == 0) {}; // Do nothing until UDR is ready for more data to be written to it
+		UDRE0 = ReceivedByte; // Echo back the received byte back to the computer
+		
 		if(bit_is_clear(pushbutton_pin,pushbutton_bit))
 		{
 			_delay_ms(10);
@@ -419,21 +425,17 @@ void uart_init()
 	/* Setting the XCKn port pin as output, enables master
 	mode. */
 	XCK_DDR |= (1<<XCK_BIT);
-	/* Set MSPI mode of operation and SPI data mode 0. */
-	UCSR0C =
-	(1<<UMSEL01)|(1<<UMSEL00)|(0<<UPM00)|(0<<UCPOL0);
+	
+	// Use 8-bit character sizes, 2 stop bits
+	UCSR0C = (1<<USBS0)|(1<<UCSZ00)|(1<<UCSZ01);
+	
 	/* Enable receiver and transmitter. */
 	UCSR0B = (1<<RXEN0)|(1<<TXEN0);
-	/* Set baud rate. */
-	/* IMPORTANT: The Baud Rate must be set after the
-	transmitter is enabled */
-	UBRR0 = BAUD;
 	
-	// Old code
-	//UBRRn = 0;
-	//(1<<UMSELn1)|(1<<UMSELn0)|(0<<UCPHAn)|(0<<UCPOLn);
-	//UCSRnB = (1<<RXENn)|(1<<TXENn);
-	//UBRRN = BAUD
+	/* Set baud rate. */
+	//UBRR0 = BAUD;
+	UBRR0H = (BAUD_PRESCALE >> 8)
+	UBRR0L = BAUD_PRESCALE;
 }
 
 // Print a string
