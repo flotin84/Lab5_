@@ -4,10 +4,12 @@
  * Created: 4/8/2016 4:46:47 PM
  * Author : Robin and Weston
  
+ ************ Sources ************
  LCD routines adapted from http://web.alfredstate.edu/weimandn/programming/lcd/ATmega328/LCD_code_gcc_4d.html
  ADC routines adapted from http://extremeelectronics.co.in/avr-tutorials/using-adc-of-avr-microcontroller/
  http://homepage.hispeed.ch/peterfleury/avr-software.html
  http://homepage.hispeed.ch/peterfleury/doxygen/avr-gcc-libraries/group__pfleury__ic2master.html
+ http://s-iihr64.iihr.uiowa.edu/MyWeb/Teaching/ECE3360_2016/Resources/SerialSample.c
  Frequency routines from Atmel documentation AVR205
  */ 
 /************************************************************************
@@ -35,13 +37,22 @@ Signal   |     |        PC1|---------------->|D5        |
 
 #define F_CPU 8000000UL							// 8 MHz clock speed
 
-#define BAUD 9600
-#define BAUD_PRESCALE (((F_CPU / (BAUD * 16UL))) - 1)
+#define BAUD_RATE 9600
 
 #include <avr/io.h>
 #include <util/delay.h>
 #include <compat/ina90.h>						// defines _NOP, _CLI, _SEI
 #include <avr/interrupt.h>
+#include <avr/pgmspace.h>     //  Routine for FLASH (program memory)
+#include <string.h>
+#include <stdio.h>
+
+// Variables and #define for the RX ring buffer.
+
+#define RX_BUFFER_SIZE 64
+unsigned char rx_buffer[RX_BUFFER_SIZE];
+volatile unsigned char rx_buffer_head;
+volatile unsigned char rx_buffer_tail;
 
 // LCD Interface
 #define lcd_D7_port     PORTC                   // lcd D7 connection
@@ -105,9 +116,6 @@ uint8_t enter_month[] = "Enter Month (Two digits):";
 uint8_t enter_day[] = "Enter Day (Two digits):";
 uint8_t enter_year[] = "Enter Year (Two digits):";
 
-const char sdata[] = "Hello World!\n";			// String in SRAM
-const char fdata[] PROGMEM = "Flash Gordon\n";	// String in Flash
-
 // Function prototypes
 void lcd_init_4d(void);
 void lcd_write_instruction_4d(uint8_t theInstruction);
@@ -117,16 +125,22 @@ void lcd_write_string_4d(uint8_t theString[]);
 uint16_t read_ADC(void);
 void init_freq_cntr(void);
 unsigned int freq_cntr_get_frequency(void);
-void getDate(int *yy, int *mm, int *dd);
-void uart_init();
-void uart_putc(char c);
-char uart_getc();
-void uart_printstr(char *s);
+unsigned char uart_buffer_empty(void);
+void usart_prints(const char *ptr);
+void usart_printf(const char *ptr);
+void usart_init(void);
+void getDate(int *yy,int *mm, int*dd);
+void usart_putc(const char c);
+unsigned char usart_getc(void);
 
 // variables
 uint16_t adc_result;
 int mode = 0;
 int mode_new = 0;
+
+// Sample strings in SRAM and Flash, used for examples.
+const char sdata[] = "Hello World!\n";          // String in SRAM
+const char fdata[] PROGMEM = "Flash Gordon\n";  // String in Flash
 
 /******************************* Main Program Code *************************/
 int main(void)
@@ -175,29 +189,24 @@ int main(void)
 	// Code for interfacing with the serial connection
 	char str[25];
 	int yy,mm,dd;
-	sei();					// Enable global interrupts
-	uart_init();			// Initialize the USART using baud rate 9600
-	uart_printstr(sdata);		// Print a string from SRAM
-	uart_printstr(fdata);		// Print a string from FLASH
+	sei();                  // Enable interrupts
 
-	
-	getDate(&yy,&mm,&dd);	// Get date from user
+	usart_init();           // Initialize the USART
+
+	// Get the date, make a formatted string, and then
+	// send via the USART.
+
+	getDate(&yy,&mm,&dd);
 	sprintf(str,"Date: %d/%d/%d\n",yy,mm,dd);
-	uart_printstr(str);
+	usart_prints(str);
+
 
 	// I2C code	
 	//i2c_init();				// initialize I2C library
 	
-
-	char ReceivedByte;
 	// endless loop
 	while(1)
 	{
-		while ((UCSR0A & (1 << RXC0)) == 0) {}; // Do nothing until data have been received and is ready to be read from UDR
-		ReceivedByte = UDRE0; // Fetch the received byte value into the variable "ByteReceived"
-
-		while ((UCSR0A & (1 << TXC0)) == 0) {}; // Do nothing until UDR is ready for more data to be written to it
-		UDRE0 = ReceivedByte; // Echo back the received byte back to the computer
 		
 		if(bit_is_clear(pushbutton_pin,pushbutton_bit))
 		{
@@ -419,64 +428,157 @@ unsigned int freq_cntr_get_frequency(void)
 }
 
 // UART
-void uart_init()
+void getDate(int *yy,int *mm, int*dd)
 {
-	UBRR0 = 0;
-	/* Setting the XCKn port pin as output, enables master
-	mode. */
-	XCK_DDR |= (1<<XCK_BIT);
+	char temp[5];
+	int i;
+	do {
+	usart_prints("\nPlease Enter Year (yyyy):");
+	for (i = 0; i <= 4; i++)
+	{
+		temp[i] = usart_getc();    // Get character
+		usart_putc(temp[i]);       // Echo it back
+	}
+	temp[i] = '\0';
+	sscanf(temp,"%d",yy);
+	} while(*yy < 2016 || *yy > 2020);
 	
-	// Use 8-bit character sizes, 2 stop bits
-	UCSR0C = (1<<USBS0)|(1<<UCSZ00)|(1<<UCSZ01);
+	do {
+	usart_prints("\nPlease Enter Month (mm):");
+	for (i = 0; i <= 2; i++)
+	{
+		temp[i] = usart_getc();    // Get character
+		usart_putc(temp[i]);       // Echo it back
+	}
+	temp[i] = '\0';
+	sscanf(temp,"%d",mm);
+	} while(*mm < 1 || *mm > 12);
 	
-	/* Enable receiver and transmitter. */
-	UCSR0B = (1<<RXEN0)|(1<<TXEN0);
-	
-	/* Set baud rate. */
-	//UBRR0 = BAUD;
-	UBRR0H = (BAUD_PRESCALE >> 8)
-	UBRR0L = BAUD_PRESCALE;
+	do {
+	usart_prints("\nPlease Enter Day (dd):");
+	for (i = 0; i <= 2; i++)
+	{
+		temp[i] = usart_getc();    // Get character
+		usart_putc(temp[i]);       // Echo it back
+	}
+	temp[i] = '\0';
+	sscanf(temp,"%d",dd);
+	} while(*dd < 1 || *dd > 31);
+	usart_prints("\n");
 }
 
-// Print a string
-void uart_printstr(char *s)
+
+ISR(USART_RX_vect)
 {
-	while(*s){
-		uart_putc(*s);
-		s++;
+	// UART receive interrupt handler.
+	// To do: check and warn if buffer overflows.
+	
+	char c = UDR0;
+	rx_buffer[rx_buffer_head] = c;
+	if (rx_buffer_head == RX_BUFFER_SIZE - 1)
+	rx_buffer_head = 0;
+	else
+	rx_buffer_head++;
+}
+
+void usart_init(void)
+{
+	// Configures the USART for serial 8N1 with
+	// the Baud rate controlled by a #define.
+
+	unsigned short s;
+	
+	// Set Baud rate, controlled with #define above.
+	
+	s = (double)F_CPU / (BAUD_RATE*16.0) - 1.0;
+	UBRR0H = (s & 0xFF00);
+	UBRR0L = (s & 0x00FF);
+
+	// Receive complete interrupt enable: RXCIE0
+	// Receiver & Transmitter enable: RXEN0,TXEN0
+
+	UCSR0B = (1<<RXCIE0)|(1<<RXEN0)|(1<<TXEN0);
+
+	// Along with UCSZ02 bit in UCSR0B, set 8 bits
+	
+	UCSR0C = (1<<UCSZ01)|(1<<UCSZ00);
+	
+	DDRD |= (1<< 1);         // PD0 is output (TX)
+	DDRD &= ~(1<< 0);        // PD1 is input (Rx)
+	
+	// Empty buffers
+	
+	rx_buffer_head = 0;
+	rx_buffer_tail = 0;
+}
+
+
+void usart_printf(const char *ptr){
+
+	// Send NULL-terminated data from FLASH.
+	// Uses polling (and it blocks).
+
+	char c;
+
+	while(pgm_read_byte_near(ptr)) {
+		c = pgm_read_byte_near(ptr++);
+		usart_putc(c);
 	}
 }
 
-// Gets character
-char uart_getc()
-{
-	return UDR0;
-}
+void usart_putc(const char c){
 
-// sends character
-void uart_putc(char c)
-{
-	while(!((UCSR0A)& (_BV(UDRE0))));
+	// Send "c" via the USART.  Uses poling
+	// (and it blocks). Wait for UDRE0 to become
+	// set (=1), which indicates the UDR0 is empty
+	// and can accept the next character.
+
+	while (!(UCSR0A & (1<<UDRE0)))
+	;
 	UDR0 = c;
 }
 
-void getDate(int *yy, int *mm, int *dd)
-{
-	unsigned char c;
-	char str[25];
-	int i;
-	// Get date from user
-	// modify values yy, mm, dd
-	uart_printstr("Please Enter Year (yyyy):");
-	for (i=0;i<=4-1;i++){
-		c = uart_getc(); // Get character
-		uart_putc(c); // Echo it back
-		str[i] = c;
-	}
-	str[i] = '\0';
-}
-/*
+void usart_prints(const char *ptr){
+	
+	// Send NULL-terminated data from SRAM.
+	// Uses polling (and it blocks).
 
+	while(*ptr) {
+		while (!( UCSR0A & (1<<UDRE0)))
+		;
+		UDR0 = *(ptr++);
+	}
+}
+
+unsigned char usart_getc(void)
+{
+
+	// Get char from the receiver buffer.  This
+	// function blocks until a character arrives.
+	
+	unsigned char c;
+	
+	// Wait for a character in the buffer.
+
+	while (rx_buffer_tail == rx_buffer_head)
+	;
+	
+	c = rx_buffer[rx_buffer_tail];
+	if (rx_buffer_tail == RX_BUFFER_SIZE-1)
+	rx_buffer_tail = 0;
+	else
+	rx_buffer_tail++;
+	return c;
+}
+
+unsigned char uart_buffer_empty(void)
+{
+	// Returns TRUE if receive buffer is empty.
+	
+	return (rx_buffer_tail == rx_buffer_head);
+}
+
+/*
 I2C controller library
 http://homepage.hispeed.ch/peterfleury/doxygen/avr-gcc-libraries/group__pfleury__ic2master.html
 Place this library in
